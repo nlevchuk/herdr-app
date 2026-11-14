@@ -11,6 +11,8 @@
 # Windows has curl and tar too, so the app updates the same way.
 # No core inside: the installer and the app install the core's own release
 # (distribution/core-version is the oldest core this app works with).
+# Modified in the nlevchuk/herdr-app fork: Intel Mac (macos-x86_64) packaging
+# allowed for an unofficial build. Not part of upstream Herdr.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 

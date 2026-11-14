@@ -64,7 +64,8 @@ jobs:
       fail-fast: true
       matrix:
         include:
-          # Fork-only: an unofficial Intel Mac build (manual runs only build).
+          # Modified in the nlevchuk/herdr-app fork: an unofficial Intel Mac
+          # build only, not part of upstream Herdr (manual runs only build).
           - { target: macos-x86_64, runner: macos-15-intel }
     runs-on: ${{ matrix.runner }}
     # Only tags can access the release environment's Apple certificate.
