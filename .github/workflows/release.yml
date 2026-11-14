@@ -22,7 +22,8 @@ run-name: ${{ github.ref_type == 'tag' && format('release {0}', github.ref_name)
 on:
   push:
     tags: ["v*"]
-    branches: [master]
+    # Fork-only: pushing the Intel Mac branch builds it.
+    branches: [master, claude/cool-feynman-dmraen]
     paths:
       - Cargo.lock
       - Cargo.toml
