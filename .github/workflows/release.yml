@@ -22,8 +22,7 @@ run-name: ${{ github.ref_type == 'tag' && format('release {0}', github.ref_name)
 on:
   push:
     tags: ["v*"]
-    # Fork-only: pushing the Intel Mac branch builds it.
-    branches: [master, claude/cool-feynman-dmraen]
+    branches: [master]
     paths:
       - Cargo.lock
       - Cargo.toml
@@ -134,11 +133,12 @@ jobs:
           fi
           tar -xOf "$archive" "$prefix/THIRD-PARTY-NOTICES" | cmp - THIRD-PARTY-NOTICES
           tar -xOf "$archive" "$prefix/LICENSE" | cmp - LICENSE
+      # Fork-only: the Intel Mac branch keeps its own cache too.
       - name: Note the sources the cache was built from
-        if: github.ref == 'refs/heads/master'
+        if: github.ref == 'refs/heads/master' || github.ref == 'refs/heads/claude/cool-feynman-dmraen'
         run: scripts/ci-sources record
       - name: Save build cache
-        if: github.ref == 'refs/heads/master'
+        if: github.ref == 'refs/heads/master' || github.ref == 'refs/heads/claude/cool-feynman-dmraen'
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: *cache-paths

@@ -1,0 +1,146 @@
+#!/bin/bash
+# Modified in the nlevchuk/herdr-app fork: not part of upstream Herdr.
+#
+# Updates the unofficial Intel Mac build of Herdr in one command:
+#
+#   intel-mac-update              install the latest Herdr release if it's newer
+#   intel-mac-update --force      rebuild and reinstall even if up to date
+#   intel-mac-update --schedule   also check once a day (a LaunchAgent)
+#   intel-mac-update --unschedule stop the daily check
+#
+# What it does: finds the latest official version, moves this fork branch's
+# commits onto that release's tag, pushes the branch, runs the "build and
+# release" workflow on it, downloads the Intel build and replaces
+# ~/Applications/Herdr.app. The fork's master is never touched.
+#
+# Needs: the GitHub CLI logged in with the workflow scope
+#   brew install gh && gh auth login -s workflow
+set -euo pipefail
+export PATH="/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin:$PATH"
+
+fork=${HERDR_FORK:-nlevchuk/herdr-app}
+branch=${HERDR_FORK_BRANCH:-claude/cool-feynman-dmraen}
+upstream=https://github.com/herdrdev/herdr-app
+releases=${HERDR_RELEASES_URL:-https://releases.herdr.dev}
+app=${HERDR_APP_PATH:-$HOME/Applications/Herdr.app}
+artifact=herdr-app-macos-x86_64
+agent=dev.herdr.intel-mac-update
+plist="$HOME/Library/LaunchAgents/$agent.plist"
+log="$HOME/Library/Logs/herdr-intel-mac-update.log"
+
+say() { printf 'intel-mac-update: %s\n' "$*"; }
+notify() {
+  # Only scheduled runs notify: an interactive run already prints.
+  [[ -t 1 ]] && return 0
+  osascript -e "display notification \"$1\" with title \"Herdr (Intel build)\"" >/dev/null 2>&1 || true
+}
+fail() { say "$*" >&2; notify "$*"; exit 1; }
+
+force=0
+case "${1:-}" in
+  "") ;;
+  --force) force=1 ;;
+  --schedule)
+    self=$(cd "$(dirname "$0")" && pwd)/$(basename "$0")
+    mkdir -p "$(dirname "$plist")" "$(dirname "$log")"
+    cat > "$plist" <<PLIST
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+  <key>Label</key><string>$agent</string>
+  <key>ProgramArguments</key><array><string>$self</string></array>
+  <key>StartCalendarInterval</key><dict><key>Hour</key><integer>11</integer><key>Minute</key><integer>17</integer></dict>
+  <key>StandardOutPath</key><string>$log</string>
+  <key>StandardErrorPath</key><string>$log</string>
+</dict></plist>
+PLIST
+    launchctl bootout "gui/$(id -u)/$agent" 2>/dev/null || true
+    launchctl bootstrap "gui/$(id -u)" "$plist"
+    say "checks daily at 11:17 (or at the next wake); log: $log"
+    exit 0 ;;
+  --unschedule)
+    launchctl bootout "gui/$(id -u)/$agent" 2>/dev/null || true
+    rm -f "$plist"
+    say "daily check removed"
+    exit 0 ;;
+  *) fail "unknown option $1 (see the top of this script)" ;;
+esac
+
+[[ $(uname -s) == Darwin ]] || fail "this is for macOS"
+for tool in gh git curl tar plutil; do
+  command -v "$tool" >/dev/null || fail "needs $tool (brew install gh; git comes with the Xcode command line tools)"
+done
+gh auth status >/dev/null 2>&1 || fail "log in first: gh auth login -s workflow"
+
+work=$(mktemp -d)
+trap 'rm -rf "$work"' EXIT
+
+curl -fsSL "$releases/app/latest.json" -o "$work/latest.json" || fail "cannot reach $releases"
+latest=$(plutil -extract version raw -o - "$work/latest.json") || fail "no version in latest.json"
+installed=$(plutil -extract CFBundleShortVersionString raw -o - "$app/Contents/Info.plist" 2>/dev/null || echo none)
+say "latest $latest, installed $installed"
+if [[ $installed == "$latest" && $force == 0 ]]; then
+  say "up to date"
+  exit 0
+fi
+
+# Rebase only this branch's own commits onto the release tag.
+say "moving $branch onto v$latest"
+git clone --quiet --branch "$branch" "https://github.com/$fork" "$work/src"
+cd "$work/src"
+git remote add upstream "$upstream"
+git fetch --quiet upstream master
+git fetch --quiet --no-tags upstream tag "v$latest" || fail "upstream has no tag v$latest yet; try later"
+base=$(git merge-base HEAD upstream/master)
+if ! git -c user.name="$(gh api user -q .login)" -c user.email=intel-mac-update@localhost \
+    rebase --quiet --onto "v$latest" "$base"; then
+  git rebase --abort || true
+  fail "the branch's changes conflict with v$latest; resolve the rebase by hand (or ask for help)"
+fi
+sha=$(git rev-parse HEAD)
+if [[ $sha != "$(git rev-parse "origin/$branch")" ]]; then
+  git -c credential.helper= -c credential.helper='!gh auth git-credential' \
+    push --quiet --force-with-lease "origin" "HEAD:$branch" \
+    || fail "push failed; if it mentions workflow scope, run: gh auth refresh -s workflow"
+fi
+
+# Build on GitHub's Intel Mac runner and wait for it (about 10-30 minutes).
+say "building $sha on GitHub"
+started=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+gh workflow run release.yml --repo "$fork" --ref "$branch"
+run=""
+for _ in $(seq 30); do
+  sleep 5
+  run=$(gh run list --repo "$fork" --workflow release.yml --branch "$branch" --event workflow_dispatch \
+    --limit 5 --json databaseId,headSha,createdAt \
+    -q "[.[] | select(.headSha == \"$sha\" and .createdAt >= \"$started\")][0].databaseId")
+  [[ -n $run ]] && break
+done
+[[ -n $run ]] || fail "the build didn't start; see https://github.com/$fork/actions"
+say "watching https://github.com/$fork/actions/runs/$run"
+gh run watch "$run" --repo "$fork" --exit-status --interval 60 >/dev/null \
+  || fail "the build failed: https://github.com/$fork/actions/runs/$run"
+
+# Download, check, install. gh downloads carry no quarantine flag.
+gh run download "$run" --repo "$fork" --name "$artifact" --dir "$work/dl"
+mkdir "$work/out"
+tar -xzf "$work/dl/$artifact.tar.gz" -C "$work/out"
+new="$work/out/Herdr.app"
+built=$(plutil -extract CFBundleShortVersionString raw -o - "$new/Contents/Info.plist")
+[[ $built == "$latest" ]] || fail "the build says version $built, expected $latest"
+lipo -archs "$new/Contents/MacOS/Herdr" | grep -qw x86_64 || fail "the build isn't an Intel binary"
+codesign --verify --deep --strict "$new" || fail "the build's signature doesn't verify"
+
+# Swap only once the new app is in place beside the old one.
+mkdir -p "$(dirname "$app")"
+rm -rf "$app.new" "$app.old"
+mv "$new" "$app.new"
+if [[ -e $app ]]; then mv "$app" "$app.old"; fi
+mv "$app.new" "$app"
+rm -rf "$app.old"
+/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister -f "$app" 2>/dev/null || true
+mkdir -p "$HOME/.local/bin"
+ln -sfn "$app/Contents/MacOS/Herdr" "$HOME/.local/bin/herdr-app"
+
+say "installed Herdr $latest; quit and reopen Herdr to use it (terminals keep running)"
+notify "Herdr $latest is installed. Quit and reopen Herdr to use it."
